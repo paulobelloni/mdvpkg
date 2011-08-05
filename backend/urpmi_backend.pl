@@ -37,6 +37,11 @@ use urpm::orphans qw();
 
 use File::Basename qw(fileparse);
 
+use FindBin;
+use lib "$FindBin::Bin/";
+
+use mdvpkg;
+
 
 $| = 1;
 
@@ -107,108 +112,23 @@ sub _unlock {
     $rpmdb_lock = undef;
 }
 
-sub get_evrd {
-    my ($pkg) = @_;
-    my $evrd = sprintf(
-	"{'epoch': %s," .
-	" 'version': '%s'," .
-	" 'release': '%s'",
-	$pkg->epoch,
-	$pkg->version,
-	$pkg->release);
-    if ($pkg->distepoch) {
-	$evrd .= sprintf(", 'distepoch': '%s'}",
-			 $pkg->distepoch);
-    }
-    else {
-	$evrd .= '}'
-    }
-    return $evrd;
-}
-
-# %options
-#   - auto_select: passed to resolve dependencies
-sub _get_state {
-    my ($urpm, $installs, $removals, %options) = @_;
-
-    my %state = ();
-    my @to_remove = ();
-    my %pkg_map = ();
-
-    if (@{ $removals || [] }) {
-        @to_remove = urpm::select::find_packages_to_remove(
-			$urpm,
-			\%state,
-			$removals,
-			callback_notfound => sub {
-			    shift;
-			    response('error', 'error-not-found', @_);
-			    return;
-			},
-			callback_base => sub {
-			    shift;
-			    response('error', 'error-remove-base', @_);
-			    return;
-		    }) or do {
-			return;
-		    };
-	my %remove_names = map { $_ => undef } @to_remove;
-	foreach (@{ $urpm->{depslist} }) {
-	    if (exists $remove_names{$_->fullname}) {
-		delete $remove_names{$_->fullname};
-		my $key = sprintf('%s-%s-%s.%s',
-				  $_->name,
-				  $_->version,
-				  $_->release,
-				  $_->arch);
-		$pkg_map{$key} = $_;
-	    }
-	}
-
-	urpm::orphans::compute_future_unrequested_orphans($urpm, \%state);
-	push(@to_remove,
-	     map {
-		 scalar $_->fullname
-	     } @{ $state{orphans_to_remove} });
-	foreach (@{ $state{orphans_to_remove} }) {
-	    my $key = sprintf('%s-%s-%s.%s',
-			      $_->name,
-			      $_->version,
-			      $_->release,
-			      $_->arch);
-	    $pkg_map{$key} = $_;
-	}
-
-    }
-
-    my %packages = ();
-    my $restart;
-    if (@{ $installs || [] }) {
-	urpm::select::search_packages(
-	    $urpm,
-	    \%packages,
-	    $installs,
-	    fuzzy => 0,
-	    no_substring => 1,
-	) or do {
-	    response('error', 'error-not-found', @{ $installs });
-	    return;
-	};
-	$restart = urpm::select::resolve_dependencies(
-		       $urpm,
-		       \%state,
-		       \%packages,
-		       auto_select => $options{auto_select},
-		   );
-    }
-
-    foreach (@{ $urpm->{depslist} }[keys %{ $state{selected} || {} }]) {
-	$pkg_map{$_->fullname} = $_;
-    }
-
-    # TODO Check $state for conflicts and report that to caller as
-    #      error responses.
-    return $restart, \%state, \@to_remove, %pkg_map;
+##
+# _add_pkg
+#     Add fullname and nvra entries to a pkg_map hash.
+# :Parameters:
+#     `$pkg_map` : hash_ref
+#         The pkg_map hash to add entries
+#     `$pkg` : URPM::Package
+#         The pkg to grab fullname and nvra
+#
+sub _add_pkg {
+    my $pkg_map = shift;
+    my $pkg = shift;
+    $pkg_map->{$pkg->fullname} = $pkg;
+    $pkg_map->{join('-',
+		    $pkg->name,
+		    $pkg->version,
+		    $pkg->release) . '.' . $pkg->arch} = $pkg;
 }
 
 #
@@ -228,8 +148,31 @@ sub on_task__commit {
 
     _lock();
 
-    my ($restart, $state, $to_remove, %pkg_map)
-	= _get_state($urpm, $installs, $removes);
+    my ($restart, $state, $to_remove);
+    eval {
+	($restart, $state, $to_remove)
+	    = mdvpkg::create_state($urpm, $installs, $removes);
+    }
+    or do {
+	response('error', $@->{error}, @{ $@->{names} });
+    };
+
+    # Populate pkg_map ...
+    my %pkg_map = ();
+    foreach my $id (keys %{ $state->{selected} }) {
+	my $pkg = $urpm->{depslist}[$id];
+	_add_pkg(\%pkg_map, $pkg);
+    }
+    while (my ($fn, $rej) = each %{ $state->{rejected} }) {
+	my $pkg = mdvpkg::pkg_from_fullname(
+	              $urpm,
+	              $fn,
+	              $rej->{disttag},
+	              $rej->{distepoch}
+	          );
+	_add_pkg(\%pkg_map, $pkg);
+    }
+    _add_pkg(\%pkg_map, $_) foreach (@{ $state->{orphans_to_remove} });
 
     init_progress(1
 		  + keys(%{ $state->{selected} }) * 2 # download + install
@@ -245,7 +188,7 @@ sub on_task__commit {
 	callback_report_uninst => sub {
 	    my @return = split(/ /, $_[0]);
 	    my $pkg = $pkg_map{$return[-1]};
-	    my $evrd = get_evrd($pkg);
+	    my $evrd = mdvpkg::get_evrd($pkg);
 	    response('callback', 'remove_start',
 		     $pkg->name, $pkg->arch, 100, $remove_count);
 	    response('callback', 'remove_progress',
@@ -292,7 +235,7 @@ sub on_task__commit {
 			     @na, $percent, $total, $eta, $speed);
 		}
 		elsif ($mode eq 'end') {
-		    my $evrd = get_evrd($p);
+		    my $evrd = mdvpkg::get_evrd($p);
 		    response('callback', 'download_end',
 			     $p->name, $p->arch,
 			     $evrd);
@@ -320,7 +263,7 @@ sub on_task__commit {
 		    response('callback', 'install_progress',
 			     $pkg->name, $pkg->arch, $amount, $total);
 		    if ($amount ==  $total) {
-			my $evrd = get_evrd($pkg);
+			my $evrd = mdvpkg::get_evrd($pkg);
 			response('callback', 'install_end',
 				 $pkg->name, $pkg->arch,
 				 $evrd);

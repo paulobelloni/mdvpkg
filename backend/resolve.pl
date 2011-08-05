@@ -33,6 +33,12 @@ use urpm::args qw();
 use urpm::select qw();
 use urpm::main_loop qw();
 
+use FindBin;
+use lib "$FindBin::Bin/";
+
+use mdvpkg;
+
+
 $| = 1;
 
 binmode STDOUT, ':encoding(utf8)';
@@ -59,8 +65,15 @@ MAIN: {
 	push @$list, $_;
     }
 
-    my ($restart, $state, $to_remove, %pkg_map)
-	= _get_state($urpm, $installs, $removes);
+
+    my ($restart, $state, $to_remove);
+    eval {
+	($restart, $state, $to_remove)
+	    = mdvpkg::create_state($urpm, $installs, $removes);
+    }
+    or do {
+	response_error($@->{error}, @{ $@->{names} });
+    };
 
     # Check %state and emit return data ...
     while (my ($id, $info) = each %{ $state->{selected} }) {
@@ -72,11 +85,11 @@ MAIN: {
 	else {
 	    $action = 'action-auto-install';
 	}
-	response_action($pkg->name, $pkg->arch, $action);
+	response_action($action, $pkg->name, $pkg->arch);
     }
 
     foreach (@{ $state->{orphans_to_remove} }) {
-	response_action($_->name, $_->arch, 'action-auto-remove');
+	response_action('action-auto-remove', $_->name, $_->arch, );
     }
 
     foreach (grep {
@@ -90,7 +103,7 @@ MAIN: {
 	my $name;
 	my $arch;
 	($name, undef, undef, $arch) = /^(.+)-([^-]+)-([^-].*)\.(.+)$/;
-	response_action($name, $arch, 'action-remove');
+	response_action('action-remove', $name, $arch);
     }
 
     # TODO There is no conflict checking !!
@@ -99,7 +112,7 @@ MAIN: {
 }
 
 sub response_action {
-    my ($name, $arch, $action) = @_;
+    my ($action, $name, $arch) = @_;
 	printf("%%MDVPKG SELECTED %s %s@%s\n",
 	       $action,
 	       $name,
@@ -109,97 +122,8 @@ sub response_action {
 
 sub response_error {
     my ($name, @args) = @_;
-	printf("%%MDVPKG ERROR %s\n",
+	printf("%%MDVPKG ERROR %s%s\n",
 	       $name,
-	       join("\t", @args));
+	       @args ? ' ' . join("\t", @args) : '');
 
-}
-
-######################################################################
-# TODO Replicated code from urpmi_backend
-######################################################################
-
-# %options
-#   - auto_select: passed to resolve dependencies
-sub _get_state {
-    my ($urpm, $installs, $removals, %options) = @_;
-
-    my %state = ();
-    my @to_remove = ();
-    my %pkg_map = ();
-
-    if (@{ $removals || [] }) {
-        @to_remove = urpm::select::find_packages_to_remove(
-			$urpm,
-			\%state,
-			$removals,
-			callback_notfound => sub {
-			    shift;
-			    response_error('error-not-found', @_);
-			    return;
-			},
-			callback_base => sub {
-			    shift;
-			    response_error('error-remove-base', @_);
-			    return;
-		    }) or do {
-			return;
-		    };
-	my %remove_names = map { $_ => undef } @to_remove;
-	foreach (@{ $urpm->{depslist} }) {
-	    if (exists $remove_names{$_->fullname}) {
-		delete $remove_names{$_->fullname};
-		my $key = sprintf('%s-%s-%s.%s',
-				  $_->name,
-				  $_->version,
-				  $_->release,
-				  $_->arch);
-		$pkg_map{$key} = $_;
-	    }
-	}
-
-	urpm::orphans::compute_future_unrequested_orphans($urpm, \%state);
-	push(@to_remove,
-	     map {
-		 scalar $_->fullname
-	     } @{ $state{orphans_to_remove} });
-	foreach (@{ $state{orphans_to_remove} }) {
-	    my $key = sprintf('%s-%s-%s.%s',
-			      $_->name,
-			      $_->version,
-			      $_->release,
-			      $_->arch);
-	    $pkg_map{$key} = $_;
-	}
-
-    }
-
-    my %packages = ();
-    my $restart;
-    if (@{ $installs || [] }) {
-	urpm::select::search_packages(
-	    $urpm,
-	    \%packages,
-	    $installs,
-	    fuzzy => 0,
-	    no_substring => 1,
-	) or do {
-	    response_error('error-not-found', @{ $installs });
-	    return;
-	};
-	$restart = urpm::select::resolve_dependencies(
-		       $urpm,
-		       \%state,
-		       \%packages,
-		       auto_select => $options{auto_select},
-		   );
-    }
-
-    foreach (@{ $urpm->{depslist} }[keys %{ $state{selected} || {} }]) {
-	$pkg_map{$_->fullname} = $_;
-    }
-
-    # TODO Check $state for conflicts and report that to caller as
-    #      error responses.
-    return $restart, \%state, \@to_remove, %pkg_map;
 }
