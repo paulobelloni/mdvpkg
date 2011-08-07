@@ -22,12 +22,28 @@
 """Classes and functions for rpm package representations."""
 
 import rpm
-import gobject
 import logging
 import bisect
 
 
 log = logging.getLogger('mdvpkgd.urpmi')
+
+
+def create_evrd(evrd_data):
+    """Create a RpmEVRD object from dictionaries and iterables."""
+    evrd_data_type = type(evrd_data)
+    if evrd_data_type == dict:
+        evrd = RpmEVRD(evrd_data)
+    elif evrd_data_type in {tuple, list}:
+        keys = ['version', 'release']
+        if len(evrd_data) > 2:
+            keys.insert(0, 'epoch')
+        if len(evrd_data) > 3:
+            keys.append('distepoch')
+        evrd = RpmEVRD(dict(zip(keys, evrd_data)))
+    else:
+        raise ValueError, 'bad type: %s' % evrd_data_type
+    return evrd
 
 
 class RpmEVRD(object):
@@ -142,7 +158,7 @@ class RpmPackage(object):
                               self.epoch)
 
 
-class Package(gobject.GObject):
+class Package(object):
     """Represents a package, in terms of versions and updates, in the
     urpmi database cache.
 
@@ -150,50 +166,19 @@ class Package(gobject.GObject):
     list of package versions: installed, upgrades and downgrades.
     """
 
-    __gsignals__ = {
-        'deleted': (
-            gobject.SIGNAL_RUN_FIRST,
-            gobject.TYPE_NONE,
-            ()
-        ),
-        'installed-version': (
-            gobject.SIGNAL_RUN_FIRST,
-            gobject.TYPE_NONE,
-            (gobject.TYPE_PYOBJECT,)
-        ),
-        'removed-version': (
-            gobject.SIGNAL_RUN_FIRST,
-            gobject.TYPE_NONE,
-            (gobject.TYPE_PYOBJECT,)
-        ),
-        'new-version': (
-            gobject.SIGNAL_RUN_FIRST,
-            gobject.TYPE_NONE,
-            (gobject.TYPE_PYOBJECT,)
-        ),
-    }
-
     def __init__(self, na, urpmi):
         """Create a new instance in the update state."""
-        gobject.GObject.__init__(self)
         self.na = na
         self.urpmi = urpmi
-        self._versions = {}  # { rpm.na: {'rpm': RPM, 'type': TYPE} }
+        self._versions = {}  # { rpm.evrd: {'rpm': RPM, 'type': TYPE} }
         self._types = {'installed': [],
                        'upgrade': [],
                        'downgrade': []}
         self.in_progress = None
         self.progress = None
 
-    def __getitem__(self, evrd):
-        item = None
-        if isinstance(type, RpmEVRD):
-            item = self._versions[na]
-        elif type(evrd) == dict:
-            item = self._versions[RpmEVRD(evrd)]
-        if item is None:
-            raise TypeError('bad type for evrd: %s' % type(evrd))
-        return item['rpm']
+    def __getitem__(self, key):
+        return self._get_version(key)['rpm']
 
     @property
     def name(self):
@@ -311,13 +296,13 @@ class Package(gobject.GObject):
         """
         assert self.na == other.na
         if not other._versions:
-            self.emit('deleted')
+            # self.emit('deleted')
             self.clear()
         else:
             # Check deleted version ...
             for evrd in self._versions.keys():
                 if evrd not in other._versions:
-                    self.emit('version-deleted', evrd)
+                    # self.emit('version-deleted', evrd)
                     del self._versions[evrd]
             # Check for new versions and compare installed status to
             # signal new installations or removals ...
@@ -329,44 +314,115 @@ class Package(gobject.GObject):
                 else:
                     old_dict = self._versions.get(evrd)
                     if old_dict is None:
-                        self.emit('new-version', evrd)
+                        # self.emit('new-version', evrd)
+                        pass
                     else:
                         if old_dict['type'] != version_dict['type']:
                             if old_dict['type'] == 'installed':
-                                self.emit('removed-version', evrd)
+                                # self.emit('removed-version', evrd)
+                                pass
                             elif version_dict['type'] == 'installed':
-                                self.emit('installed-version', evrd)
+                                # self.emit('installed-version', evrd)
+                                pass
                     self._versions[evrd] = version_dict
                     self._types = other._types
 
-    def on_install(self, evrd):
-        """React to the installation event of a upgrade evrd."""
-        if self.in_progress != 'installing':
-            msg = 'not installing package: %s %s' % (self.na, evrd)
-            raise ValueError, msg
-        log.debug('%s-%s installed', self.na, evrd)
+    def on_download_start(self, evrd):
+        """React to the start of a version download."""
+        assert self.in_progress == 'installing'
+        version = self._get_version(evrd)
+        assert version['type'] == 'upgrade'
+        self.progress = 0.0
+
+    def on_download_progress(self, evrd, fraction):
+        """React to the progress of a version download."""
+        assert self.in_progress == 'installing'
+        version = self._get_version(evrd)
+        assert version['type'] == 'upgrade'
+        self.progress = fraction / 2.0
+
+    def on_download_done(self, evrd):
+        """React to the end of a version download."""
+        assert self.in_progress == 'installing'
+        version = self._get_version(evrd)
+        assert version['type'] == 'upgrade'
+        self.progress = 0.5
+        log.debug('downloaded %s-%s-%s.%s',
+                  self.name,
+                  evrd['version'],
+                  evrd['release'],
+                  self.arch)
+
+    def on_install_start(self, evrd):
+        """React to the start of installation of a version."""
+        assert self.in_progress == 'installing'
+        version = self._get_version(evrd)
+        assert version['type'] == 'upgrade'
+        self.in_progress = 'installing'
+        self.progress = 0.5
+
+    def on_install_progress(self, evrd, fraction):
+        """React to the progress of installation of a version."""
+        assert self.in_progress == 'installing'
+        version = self._get_version(evrd)
+        assert version['type'] == 'upgrade'
+        self.progress = 0.5 + (fraction / 2.0)
+
+    def on_install_done(self, evrd):
+        """React to the end of installation of a version."""
+        assert self.in_progress == 'installing'
+        version = self._get_version(evrd)
+        assert version['type'] == 'upgrade'
+
         self.in_progress = None
-        evrd = RpmEVRD(evrd)
-        version = self._versions.get(evrd)
-        if version is None:
-            raise ValueError, 'not version of %s: %s' % (self.na, evrd)
         self._set_latest_installed(version['rpm'])
         self._set_type(version, 'installed')
+        log.debug('installed %s-%s-%s.%s',
+                  self.name,
+                  evrd['version'],
+                  evrd['release'],
+                  self.arch)
 
+    def on_remove_start(self, evrd):
+        """React to the start of a version removal."""
+        assert self.in_progress is 'removing'
+        version = self._get_version(evrd)
+        assert version['type'] == 'installed'
+        self.in_progress = 'removing'
+        self.progress = 0.0
 
-    def on_remove(self, evrd):
-        """React to the removal of an installed evrd."""
-        if self.in_progress != 'removing':
-            msg = 'not removing package: %s %s' % (self.na, evrd)
-            raise ValueError, msg
-        log.debug('%s-%s removed', self.na, evrd)
+    def on_remove_progress(self, evrd, fraction):
+        assert self.in_progress == 'removing'
+        version = self._get_version(evrd)
+        assert version['type'] == 'installed'
+        self.progress = fraction
+
+    def on_remove_done(self, evrd):
+        """React to the end of removal of a version."""
+        assert self.in_progress == 'removing'
+        version = self._get_version(evrd)
+        assert version['type'] == 'installed'
         self.in_progress = None
-        evrd = RpmEVRD(evrd)
+        if self.has_installs and version['rpm'] < self.latest_installed:
+            new_type = 'downgrade'
+        else:
+            new_type = 'upgrade'
+        self._set_type(version, new_type)
+        log.debug('removed %s-%s-%s.%s',
+                  self.name,
+                  evrd['version'],
+                  evrd['release'],
+                  self.arch)
+
+    def _get_version(self, key):
+        if isinstance(key, RpmEVRD):
+            evrd = key
+        else:
+            evrd = create_evrd(key)
         version = self._versions.get(evrd)
         if version is None:
-            raise ValueError, 'not version of %s: %s' % (self.na, evrd)
-        self._set_type(version, 'upgrade')
-
+            raise KeyError, 'not version of %s: %s' % (self.na, evrd)
+        return version
 
     def _set_latest_installed(self, rpm):
         if not self.has_installs or rpm > self.latest_installed:
@@ -384,8 +440,8 @@ class Package(gobject.GObject):
 
     def _latest_by_type(self, type):
         """Return the latest package of specified type."""
-        na = sorted(self._types[type])[-1]
-        return self._versions[na]['rpm']
+        evrd = sorted(self._types[type])[-1]
+        return self._versions[evrd]['rpm']
 
     def _set_type(self, version_dict, type):
         rpm = version_dict['rpm']

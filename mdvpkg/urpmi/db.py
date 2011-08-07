@@ -161,7 +161,7 @@ def parse_configuration(conf_path):
     return global_block, medias
 
 
-class UrpmiDB(object):
+class UrpmiDB(mdvpkg.ConnectableObject):
     """Provide access to the urpmi database of medias and packages."""
 
     def __init__(self, 
@@ -198,40 +198,20 @@ class UrpmiDB(object):
                              gobject.IO_IN,
                              self._ino_in_callback)
         self._runner = mdvpkg.urpmi.task.UrpmiRunner(self.backend_dir)
-        self._signals = {'download-start': [],
-                         'download-progress': [],
-                         'download-end': [],
-                         'download-error': [],
-                         'install-start': [],
-                         'install-progress': [],
-                         'remove-start': [],
-                         'remove-progress': [],
-                         'preparing': [],
-                         'package-changed': [],
-                         'task-queued': [],
-                         'task-running': [],
-                         'task-progress': [],
-                         'task-done': []}
-        self._signals_callbacks = {}
-
-    def emit(self, signal_name, *args, **kwargs):
-        """Emit a signal calling all callbacks."""
-        for handler in self._signals[signal_name]:
-            callback, _ = self._signals_callbacks[handler]
-            callback(*args, **kwargs)
-
-    def connect(self, signal_name, callback):
-        """Connect a callback to a signal."""
-        conn_tuple = (callback, signal_name)
-        handler = hash(conn_tuple)
-        self._signals_callbacks[handler] = conn_tuple
-        self._signals[signal_name].append(handler)
-        return handler
-
-    def disconnect(self, handler_id):
-        """Disconnect a signal callback."""
-        _, s_name = self._signals_callbacks.pop(handler_id)
-        self._signals[s_name].remove(handler_id)
+        super(UrpmiDB, self).__init__(signals=['download-start',
+                                               'download-progress',
+                                               'download-end',
+                                               'download-error',
+                                               'install-start',
+                                               'install-progress',
+                                               'remove-start',
+                                               'remove-progress',
+                                               'preparing',
+                                               'package-changed',
+                                               'task-queued',
+                                               'task-running',
+                                               'task-progress',
+                                               'task-done'])
 
     def configure_medias(self):
         """Read configuration file, locate and populate the list of
@@ -426,56 +406,79 @@ class UrpmiDB(object):
     def on_task_exception(self, task_id, message):
         log.debug('task exception: %s: %s', task_id, message)
 
-    def on_download_start(self, task_id, name, arch):
-        package = self._cache[(name, arch)]
-        package.progress = 0.0
+    def on_download_start(self, task_id, na, evrd):
+        na = eval(na)
+        evrd = eval(evrd)
+        package = self._cache[na]
+        package.on_download_start(evrd)
         self.emit('download-start', task_id, package)
 
-    def on_download_progress(self, task_id, name, arch, percent,
+    def on_download_progress(self, task_id, na, evrd, percent,
                              total, eta, speed):
-        package = self._cache[(name, arch)]
-        package.progress = int(percent) / 2.0 / 100
+        na = eval(na)
+        evrd = eval(evrd)
+        package = self._cache[na]
+        package.on_download_progress(evrd, float(percent) / 100.0)
         self.emit('download-progress',
                   task_id, package, percent, total, eta, speed)
 
-    def on_download_end(self, task_id, name, arch, evrd):
-        package = self._cache[(name, arch)]
-        package.progress = 0.5
+    def on_download_end(self, task_id, na, evrd):
+        na = eval(na)
+        evrd = eval(evrd)
+        package = self._cache[na]
+        package.on_download_done(evrd)
         self.emit('download-end', task_id, package)
+
+    def on_download_error(self, na, evrd, message):
+        na = eval(na)
+        evrd = eval(evrd)
+        package = self._cache[na]
+        package.on_download_done(evrd)
+        self.emit('download-error', task_id, package, message)
 
     def on_preparing(self, task_id, total):
         self.emit('preparing', task_id, total)
 
-    def on_install_start(self, task_id, name, arch, total, count):
-        package = self._cache[(name, arch)]
-        package.progress = 0.5
+    def on_install_start(self, task_id, na, evrd, total, count):
+        na = eval(na)
+        evrd = eval(evrd)
+        package = self._cache[na]
+        package.on_install_start(evrd)
         self.emit('install-start', task_id, package, total, count)
 
-    def on_install_progress(self, task_id, name, arch, amount, total):
-        package = self._cache[(name, arch)]
-        package.progress = 0.5  + (float(amount) / float(total) / 2.0)
+    def on_install_progress(self, task_id, na, evrd, amount, total):
+        na = eval(na)
+        evrd = eval(evrd)
+        package = self._cache[na]
+        package.on_install_progress(evrd, float(amount) / float(total))
         self.emit('install-progress', task_id, package, amount, total)
 
-    def on_install_end(self, task_id, name, arch, evrd):
-        package = self._cache[(name, arch)]
-        package.progress = None
-        package.on_install(eval(evrd))
+    def on_install_end(self, task_id, na, evrd):
+        na = eval(na)
+        evrd = eval(evrd)
+        package = self._cache[na]
+        package.on_install_done(evrd)
         self.emit('package-changed')
 
-    def on_remove_start(self, task_id, name, arch, total, count):
-        package = self._cache[(name, arch)]
-        package.progress = 0.0
+    def on_remove_start(self, task_id, na, evrd, total, count):
+        na = eval(na)
+        evrd = eval(evrd)
+        package = self._cache[na]
+        package.on_remove_start(evrd)
         self.emit('remove-start', task_id, package, total, count)
 
-    def on_remove_progress(self, task_id, name, arch, amount, total):
-        package = self._cache[(name, arch)]
-        package.progress = 100.0
+    def on_remove_progress(self, task_id, na, evrd, amount, total):
+        na = eval(na)
+        evrd = eval(evrd)
+        package = self._cache[na]
+        package.on_remove_progress(evrd, float(amount) / float(total))
         self.emit('remove-progress', task_id, package, amount, total)
 
-    def on_remove_end(self, task_id, name, arch, evrd):
-        package = self._cache[(name, arch)]
-        package.progress = None
-        package.on_remove(eval(evrd))
+    def on_remove_end(self, task_id, na, evrd):
+        na = eval(na)
+        evrd = eval(evrd)
+        package = self._cache[na]
+        package.on_remove_done(evrd)
         self.emit('package-changed')
 
 
@@ -641,7 +644,6 @@ class PackageList(object):
         removes = []
         auto_removes = []
         for na, item in self._items.iteritems():
-            pkg = self._urpmi.get_package(na)
             if item['action'] == ACTION_INSTALL:
                 installs.append(na)
             elif item['action'] == ACTION_AUTO_INSTALL:
@@ -656,7 +658,9 @@ class PackageList(object):
                                              'removing', 'removing'],
                                         [installs, auto_installs,
                                              removes, auto_removes]):
-            for pkg in [self._urpmi.get_package(na) for na in na_list]:
+            for na in na_list:
+                self._items[na]['action'] = ACTION_NO_ACTION
+                pkg = self._urpmi.get_package(na)
                 pkg.in_progress = in_progress
                 pkg.progress = 0.0
         self._sort_and_filter()
