@@ -255,6 +255,7 @@ class UrpmiDB(mdvpkg.ConnectableObject):
                     'action-auto-install': [],
                     'action-remove': [],
                     'action-auto-remove': []}
+        rejected = {}
         backend = subprocess.Popen(os.path.join(self.backend_dir,
                                                 'resolve.pl'),
                                    shell=True,
@@ -264,10 +265,11 @@ class UrpmiDB(mdvpkg.ConnectableObject):
         #            the backend.
         args = []
         for install in installs:
-            name = self._cache[install].latest_upgrade.__str__()
+            name = '%s' % (self._cache[install].latest_upgrade)
             args.append(name)
         for remove in removes:
-            args.append('r:' + remove[0])
+            name = '%s' % (self._cache[remove].latest_installed)
+            args.append('r:' + name)
         backend.stdin.write('%s\n' % '\t'.join(args))
         for line in backend.communicate()[0].split('\n'):
             if line.startswith('%MDVPKG '):
@@ -282,7 +284,31 @@ class UrpmiDB(mdvpkg.ConnectableObject):
                     if self._cache[na].in_progress is not None:
                         raise PackageInProgressConflict
                     selected[action].append((na, evrd))
-        return selected
+                elif fields[0] == 'REJECTED':
+                    reason, na, evrd = fields[1:4]
+                    na = eval(na)
+                    evrd = eval(evrd)
+                    if reason == 'reject-install-unsatisfied':
+                        subjects = fields[4:]
+                    elif reason in {'reject-install-conflicts',
+                                    'reject-install-rejected-dependency'}:
+                        subjects = []
+                        for na_s, evrd_s in [eval(pt) for pt in fields[4:]]:
+                            subjects.append(self._cache[na_s][evrd_s])
+                    else:
+                        subjects = None
+                    rej_list = rejected.get(reason)
+                    if rej_list is None:
+                        rej_list = []
+                        rejected[reason] = rej_list
+                    rej = { 'package':
+                                self._cache[na],
+                            'rpm':
+                                self._cache[na][evrd] }
+                    if subjects:
+                        rej['subjects'] = subjects
+                    rej_list.append(rej)
+        return selected, rejected
 
     def auto_select(self):
         """Resolve all install deps to install all upgradable packages
@@ -606,10 +632,13 @@ class PackageList(object):
         return self._solve()
 
     def _solve(self):
-        """Select a package for installation and all it's dependencies."""
+        """Select all packages with actions, solve dependencies
+        updating actions.  Return lists of selections and rejections.
+        """
         installs = []
         removes = []
         items_with_actions = []
+
         for na, item in self._items.iteritems():
             if item['action'] == ACTION_INSTALL:
                 installs.append(na)
@@ -617,24 +646,42 @@ class PackageList(object):
                 removes.append(na)
             if item['action'] != ACTION_NO_ACTION:
                 items_with_actions.append(item)
-        action_list = self._urpmi.resolve_deps(installs=installs,
-                                               removes=removes)
-        for item in items_with_actions:
-            item['action'] = ACTION_NO_ACTION
+
+        action_list, reject_list \
+            = self._urpmi.resolve_deps(installs=installs,
+                                       removes=removes)
+        if not reject_list:
+            for item in items_with_actions:
+                item['action'] = ACTION_NO_ACTION
+
+        installs_rej = []
+        removes_rej = []
+        for reason, rejects in reject_list.iteritems():
+            for reject in rejects:
+                if reason.startswith('reject-install-'):
+                    installs_rej.append((reason,
+                                         reject['rpm'],
+                                         reject['subjects']))
+                else:
+                    removes_rej.append((reason,
+                                        reject['rpm'],
+                                        reject['subjects']))
         installs_fn = []
         removes_fn = []
         for action, names in action_list.iteritems():
-             for na, evrd in names:
-                log.debug('action changed for %s: %s', na, action)
-                self._items[na]['action'] = action
+            for na, evrd in names:
                 rpm = self._urpmi.get_package(na)[evrd]
+                if not reject_list:
+                    log.debug('action changed for %s: %s', rpm, action)
+                    self._items[na]['action'] = action
                 if action in {ACTION_INSTALL, ACTION_AUTO_INSTALL}:
                     installs_fn.append(rpm)
                 elif action in {ACTION_REMOVE, ACTION_AUTO_REMOVE}:
                     removes_fn.append(rpm)
+
         self._sort_and_filter()
-        # (installable, removable, install_conflicts, remove_conflicts)
-        return installs_fn, removes_fn, [], []
+
+        return installs_fn, removes_fn, installs_rej, removes_rej
 
     def process_actions(self):
         """Process the selected actions and their dependencies.

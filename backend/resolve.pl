@@ -55,6 +55,8 @@ MAIN: {
 
     # Initializing urpmi ...
     my $urpm = urpm->new_parse_cmdline;
+    $urpm->{debug} = sub { print "[debug] @_\n" };
+    $urpm->{debug_URPM} = sub { print "[debug_URPM] @_\n" };
     urpm::media::configure($urpm);
 
     # Parse args ...
@@ -75,7 +77,67 @@ MAIN: {
 	response_error($@->{error}, @{ $@->{names} });
     };
 
+    my $pkg_map = mdvpkg::create_pkg_map($urpm, $state);
+
     # Check %state and emit return data ...
+    CHECK_UNSELECTED: {
+	my @unselected_names = grep {
+	                           $state->{rejected}{$_}{backtrack}
+				   || $state->{rejected}{$_}{closure}
+	                       } keys %{ $state->{rejected} };
+	foreach my $fullname (@unselected_names) {
+            my $pkg = $pkg_map->{$fullname};
+
+            my $backtrack = $state->{rejected}{$fullname}{backtrack};
+            if (@{ $backtrack->{unsatisfied} || [] }) {
+                response_reject(
+                    'reject-install-unsatisfied',
+                    $pkg,
+                    map {
+                        /\D/ ? $_ : $urpm->{depslist}[$_]->fullname;
+                    } @{ $backtrack->{unsatisfied} }
+                );
+            }
+	    foreach my $type (qw(conflicts keep)) {
+		if (@{ $backtrack->{$type} || [] }) {
+		    response_reject(
+			'reject-install-conflicts',
+			$pkg,
+			map {
+			    mdvpkg::pkg_arg_tuple($pkg_map->{$_});
+			} @{ $backtrack->{$type} }
+		    );
+		}
+	    }
+
+	    # TODO Don't known how to handle theses cases.  They're
+	    #      here from urpmi, and don't provide responses ...
+
+	    if ($backtrack->{promote} && !$backtrack->{keep}) {
+		print "trying to promote", join(", ",
+						@{$backtrack->{promote}});
+	    }
+
+            my $closure = $state->{rejected}{$fullname}{closure};
+	    if (%{ $closure || {} }) {
+		my ($from) = grep {
+				$_ ne 'disttag' && $_ ne 'distepoch'
+			    } keys %$closure;
+		my ($whyk) = grep {
+				$_ ne 'disttag' && $_ ne 'distepoch'
+			     } keys %{ $closure->{$from} };
+		if ($whyk eq 'avoid') {
+		    response_reject(
+			'reject-install-rejected-dependency',
+			$pkg,
+			mdvpkg::pkg_arg_tuple($pkg_map->{$from})
+		    );
+		}
+	    }
+	}
+    }
+
+    # Emit actions ...
     while (my ($id, $info) = each %{ $state->{selected} }) {
 	my $pkg = $urpm->{depslist}[$id];
 	my $action;
@@ -109,6 +171,17 @@ MAIN: {
     # TODO There is no conflict checking !!
 
     exit 0;
+}
+
+sub response_reject {
+    my ($reason, $pkg, @args) = @_;
+    mdvpkg::pkg_arg($pkg);
+    my $args = join("\t",
+		    'REJECTED',
+		    $reason,
+		    mdvpkg::pkg_arg($pkg),
+		    @args);
+    printf("%%MDVPKG %s\n", $args);
 }
 
 sub response_action {
