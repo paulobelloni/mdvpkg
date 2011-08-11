@@ -88,11 +88,12 @@ sub create_state {
 			    die {error => 'error-not-found',
 				 names => \@_};
 			},
-			callback_base => sub {
-			    shift;
-			    die {error => 'error-remove-base',
-				 names => \@_};
-		    }) or do {
+	                callback_base => sub {
+			    $options{ignore_base}
+			        or die {error => 'error-remove-base',
+					names => \@_};
+	                }
+		    ) or do {
 			die {error => 'error-nothing-to-remove',
 			     names => []}
 		    };
@@ -198,10 +199,12 @@ sub create_pkg_map {
     my $state = shift;
 
     my %fullnames = ();
+    my %fullnames_mark = ();
 
     my $add_fullname = sub {
 	my $fn = shift;
 	exists $fullnames{$fn} or $fullnames{$fn} = undef;
+	exists $fullnames_mark{$fn} or $fullnames_mark{$fn} = undef;
     };
 
     my $set_fullname = sub {
@@ -217,6 +220,8 @@ sub create_pkg_map {
 	    if ($nvra ne $pkg->fullname) {
 		$fullnames{$nvra} = $pkg_arg;
 	    }
+	    delete $fullnames_mark{$pkg->fullname};
+	    return scalar %fullnames_mark;
 	}
     };
 
@@ -234,13 +239,17 @@ sub create_pkg_map {
 
     # Iterate over all installed and depslist to add the
     # URPM::Package to the fullnames hash ...
-    my $db = URPM::DB::open();
-    $db->traverse(sub {
-	              my $pkg = shift;
-		      $set_fullname->($pkg);
-		  });
-    my $count = keys %fullnames;
-	$set_fullname->($_) foreach (@{ $urpm->{depslist} });
+
+    foreach (@{ $urpm->{depslist} }) {
+	$set_fullname->($_) or last;
+    }
+    if (%fullnames_mark) {
+	my $db = URPM::DB::open();
+	$db->traverse(sub {
+			  my $pkg = shift;
+			  $set_fullname->($pkg);
+		      });
+    }
 
     return \%fullnames;
 }
